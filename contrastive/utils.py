@@ -18,6 +18,8 @@ import jax
 import numpy as np
 from torch.utils.tensorboard import SummaryWriter
 import os
+from gym_mujoco_test.stretch_wrapper import StretchPickDMEnv  
+from absl import logging
 
 def obs_to_goal_1d(obs, start_index, end_index):
   assert len(obs.shape) == 1
@@ -159,47 +161,77 @@ class ObservationFilterWrapper(base.EnvironmentWrapper):
     return self._observation_spec
 
 
-def make_environment(env_name, start_index, end_index,
-                     seed, fixed_start_end = None):
-  """Creates the environment.
-
-  Args:
-    env_name: name of the environment
-    start_index: first index of the observation to use in the goal.
-    end_index: final index of the observation to use in the goal. The goal
-      is then obs[start_index:goal_index].
-    seed: random seed.
-  Returns:
-    env: the environment
-    obs_dim: integer specifying the size of the observations, before
-      the start_index/end_index is applied.
-  """
-  np.random.seed(seed)
-  gym_env, obs_dim, max_episode_steps = env_utils.load(env_name, fixed_start_end)
-  goal_indices = obs_dim + obs_to_goal_1d(np.arange(obs_dim), start_index,
-                                          end_index)
-  indices = np.concatenate([
-      np.arange(obs_dim),
-      goal_indices
-  ])
-  env = gym_wrapper.GymWrapper(gym_env)
-  env = step_limit.StepLimitWrapper(env, step_limit=max_episode_steps)
-  env = ObservationFilterWrapper(env, indices)
-  return env, obs_dim
+def make_environment(env_name, start_index, end_index, seed, fixed_start_end=None, render_mode=None):
+    """Creates the environment.
+    
+    Returns:
+        env: the environment
+        obs_dim: integer specifying the size of the observations, before
+            the start_index/end_index is applied.
+    """
+    np.random.seed(seed)
+    
+    # Add Stretch Pick environment
+    if env_name == 'stretch_pick':
+        
+        env = StretchPickDMEnv(seed=seed, num_objects=1, max_episode_steps=300, fixed_start_end=fixed_start_end, render_mode=render_mode)
+        obs_dim = 145  # 5 robot features + 20*7 object features (removed wrist yaw/pitch/roll)
+        
+        # Apply observation filtering to extract goal coordinates
+        goal_indices = obs_dim + obs_to_goal_1d(np.arange(obs_dim), start_index, end_index)
+        indices = np.concatenate([
+            np.arange(obs_dim),
+            goal_indices
+        ])
+        env = ObservationFilterWrapper(env, indices)
+        return env, obs_dim
+        
+    # Original environments
+    gym_env, obs_dim, max_episode_steps = env_utils.load(env_name, fixed_start_end)
+    goal_indices = obs_dim + obs_to_goal_1d(np.arange(obs_dim), start_index, end_index)
+    indices = np.concatenate([
+        np.arange(obs_dim),
+        goal_indices
+    ])
+    env = gym_wrapper.GymWrapper(gym_env)
+    env = step_limit.StepLimitWrapper(env, step_limit=max_episode_steps)
+    env = ObservationFilterWrapper(env, indices)
+    return env, obs_dim
 
 
 class InitiallyRandomActor(actors.GenericActor):
   """Actor that takes actions uniformly at random until the actor is updated.
   """
+#--------------------------------------------------------------------
+  
+  def __init__(self, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    self._mode = None  # "random" or "policy"
 
-  def select_action(self,
-                    observation):
-    if (self._params['mlp/~/linear_0']['b'] == 0).all():
+  def select_action(self, observation):
+    is_random = (self._params['mlp/~/linear_0']['b'] == 0).all()
+
+    new_mode = "random" if is_random else "policy"
+    if new_mode != self._mode:
+      logging.info(f"[ACTOR MODE SWITCH] {self._mode} -> {new_mode}")
+      self._mode = new_mode
+
+    if is_random:
       shape = self._params['Normal/~/linear']['b'].shape
       rng, self._state = jax.random.split(self._state)
-      action = jax.random.uniform(key=rng, shape=shape,
-                                  minval=-1.0, maxval=1.0)
+      action = jax.random.uniform(rng, shape=shape, minval=-1.0, maxval=1.0)
     else:
-      action, self._state = self._policy(self._params, observation,
-                                         self._state)
+      action, self._state = self._policy(self._params, observation, self._state)
+#--------------------------------------------------------------------
+
+  # def select_action(self,
+  #                   observation):
+  #   if (self._params['mlp/~/linear_0']['b'] == 0).all():
+  #     shape = self._params['Normal/~/linear']['b'].shape
+  #     rng, self._state = jax.random.split(self._state)
+  #     action = jax.random.uniform(key=rng, shape=shape,
+  #                                 minval=-1.0, maxval=1.0)
+  #   else:
+  #     action, self._state = self._policy(self._params, observation,
+  #                                        self._state)
     return utils.to_numpy(action)

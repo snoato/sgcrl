@@ -12,15 +12,16 @@ class ContrastiveConfig:
   """Configuration options for contrastive RL."""
   add_uid: bool = True
   time_delta_minutes: int = 5
-  log_dir: str = 'logs/'
+  log_dir: str = 'logs/contrastive_cpc_stretch_pick_42/'
   env_name: str = ''
   alg_name: str = ''
   seed: int = 0
   max_number_of_steps: int = 8_000_000
-  num_actors: int = 4
+  # num_actors: int = 4  # Reduced from 4 to save memory
+  num_actors: int = 1  # Default to 1 actor (will be overridden in params)
 
   # env options
-  fix_goals: bool = False
+  fix_goals: bool = False  # Use predefined goal state for Stretch Pick
     
   # Loss options
   batch_size: int = 256

@@ -22,6 +22,7 @@ from jax import random
 import os
 from default import make_default_logger
 from pathlib import Path
+import wandb
 
 class TrainingState(NamedTuple):
   """Contains training state for the learner."""
@@ -403,8 +404,24 @@ class ContrastiveLearner(acme.Learner):
           self._num_sgd_steps_per_step / elapsed_time)
     else:
       metrics['steps_per_second'] = 0.
-    # Attempts to write the logs.
-    self._logger.write({**metrics, **counts})
+
+    results = {**metrics, **counts}
+  # # DEBUG: Print all available keys to see if Success 1000 is there
+  #   print("AVAILABLE KEYS:", results.keys()) 
+  #   current_episode = results.get("Episodes", results.get("episodes", 0))
+  #   # Add wandb.log here to sync with the existing logger
+  #   wandb.log({
+  #       "train/success_1000": results.get("Success 1000"),
+  #       "train/success_rate": results.get("Success"),
+  #       "train/episodes": current_episode,
+  #       "dist/final_dist": results.get("Final Dist"),
+  #       "dist/delta_dist_1000": results.get("Delta Dist 1000"),
+  #       "perf/steps_per_second": results.get("steps_per_second"),
+  #       "steps/learner_steps": results.get("steps"), 
+  #       "steps/actor_steps": results.get("Actor Steps"),
+  #   })
+  #   # Attempts to write the logs.
+    self._logger.write(results)
 
   def get_variables(self, names):
     variables = {

@@ -1,4 +1,3 @@
-
 r"""Example running contrastive RL in JAX.
 
 Run using multi-threading
@@ -16,6 +15,7 @@ from contrastive import utils as contrastive_utils
 import launchpad as lp
 import numpy as np
 import os
+import wandb
 
 FLAGS = flags.FLAGS
 
@@ -27,22 +27,42 @@ flags.DEFINE_string('alg', 'contrastive_cpc', 'Algorithm type, e.g. default is c
 flags.DEFINE_string('env', 'sawyer_bin', 'Environment type, e.g. default is sawyer bin')
 flags.DEFINE_integer('num_steps', 8_000_000, 'Number of steps to run', lower_bound=0)
 flags.DEFINE_bool('sample_goals', False, 'sample the goal position uniformly according to the environment (corresponds to the original contrastive_rl algorithm)')
+flags.DEFINE_bool('render', False, 'Enable rendering during training (only works with local execution)')
 
 # fixed goal coordinates for supported environments
-fixed_goal_dict={'point_Spiral11x11': [np.array([5,5], dtype=float), np.array([10,10], dtype=float)],
-                     #note: sawyer fixed goal positions vary slightly with each episode
-                      'sawyer_bin': np.array([0.12, 0.7, 0.02]),
-                      'sawyer_box': np.array([0.0, 0.75, 0.133]),
-                      'sawyer_peg': np.array([-0.3, 0.6, 0.0])}
+fixed_goal_dict={
+    'point_Spiral11x11': [np.array([5,5], dtype=float), np.array([10,10], dtype=float)],
+    'sawyer_bin': np.array([0.12, 0.7, 0.02]),
+    'sawyer_box': np.array([0.0, 0.75, 0.133]),
+    'sawyer_peg': np.array([-0.3, 0.6, 0.0]),
+    # Uncomment this to use manual fixed goal
+    # 'stretch_pick': (
+    #     np.zeros(153, dtype=float),  # start state (will be ignored if not used)
+    #     np.concatenate([
+    #         # Robot state (13 dims) - lifted position with object grasped
+    #         np.array([0.0, 0.0, 1.0, 0.0, 0.0, 0.0,  # base pose (centered, upright)
+    #                   0.9, 0.2,                        # lift high, arm extended
+    #                   0.0, 0.0, 0.0,                   # wrist neutral
+    #                   -0.02,                           # gripper (fully closed) ← within valid range [-0.02, 0.04]
+    #                   1.0]),                           # is_grasped=True
+    #         # Object 0 state - now position-first
+    #         np.array([0.5, 0.0, 0.85,              # position (x, y, z)
+    #                   1.0, 0.0, 0.0, 0.0]),        # quaternion (qw, qx, qy, qz)
+    #         # Objects 1-19 (133 dims) - all zeros (inactive)
+    #         np.zeros(19 * 7, dtype=float)
+    #     ])
+    # )
+}
 
 @functools.lru_cache
-def get_env(env_name, start_index, end_index, seed, fix_goals = False, fix_goals_actor = False, use_naive_sampling=False, clock_period=None):
+# def get_env(env_name, start_index, end_index, seed, fix_goals = False, fix_goals_actor = False, use_naive_sampling=False, clock_period=None):
+def get_env(env_name, start_index, end_index, seed, fix_goals = False, fix_goals_actor = False, use_naive_sampling=False, clock_period=None, render_mode=None):
   if fix_goals:
-    fixed_start_end = fixed_goal_dict[env_name]
+    fixed_start_end = fixed_goal_dict.get(env_name, None)
   else:
     fixed_start_end = None
     
-  return contrastive_utils.make_environment(env_name, start_index, end_index, seed=seed, fixed_start_end = fixed_start_end)
+  return contrastive_utils.make_environment(env_name, start_index, end_index, seed=seed, fixed_start_end = fixed_start_end, render_mode=render_mode)
 
 
 def get_program(params):
@@ -50,23 +70,28 @@ def get_program(params):
 
   env_name = params['env_name']
   seed = params['seed']
+  
+  # Extract render_mode before creating config (it's not a config parameter)
+  render_mode = params.pop('render_mode', None)
 
   config = contrastive.ContrastiveConfig(**params)
   
   fix_goals = params['fix_goals']
 
   if fix_goals:
-    fixed_start_end = fixed_goal_dict[env_name]
+    fixed_start_end = fixed_goal_dict.get(env_name, None)
   else:
     fixed_start_end = None
     
+  # Actor environment factory: NO rendering (to avoid GLFW threading conflicts)
   env_factory = lambda seed: contrastive_utils.make_environment(  # pylint: disable=g-long-lambda
-      env_name, config.start_index, config.end_index, seed, fixed_start_end = fixed_start_end)
+      env_name, config.start_index, config.end_index, seed, fixed_start_end = fixed_start_end, render_mode = None)
 
   env_factory_no_extra = lambda seed: env_factory(seed)[0]  # Remove obs_dim.
     
+  # Evaluator uses render_mode
   environment, obs_dim = get_env(env_name, config.start_index,
-                                 config.end_index, seed, fix_goals = fix_goals)
+                                 config.end_index, seed, fix_goals = fix_goals, render_mode = render_mode)
 
   assert (environment.action_spec().minimum == -1).all()
   assert (environment.action_spec().maximum == 1).all()
@@ -79,7 +104,7 @@ def get_program(params):
       hidden_layer_sizes=config.hidden_layer_sizes)
     
   env_factory_fixed_goals = lambda seed: contrastive_utils.make_environment(  # pylint: disable=g-long-lambda
-      env_name, config.start_index, config.end_index, seed, fixed_start_end = fixed_goal_dict[env_name])
+      env_name, config.start_index, config.end_index, seed, fixed_start_end = fixed_goal_dict.get(env_name, None), render_mode = render_mode)
   env_factory_no_extra_fixed_goals = lambda seed: env_factory_fixed_goals(seed)[0]  # Remove obs_dim.
     
   agent = contrastive.DistributedContrastive(
@@ -114,6 +139,8 @@ def main(_):
       'env_name': env_name,
       # the number of environment steps
       'max_number_of_steps': FLAGS.num_steps,
+      'render_mode': 'human' if FLAGS.render else None,
+      'num_actors': 1 if FLAGS.render else 4,  # Use only 1 actor when rendering
   }
   # 2. Select an algorithm. The currently-supported algorithms are:
   # contrastive_nce, contrastive_cpc, c_learning, nce+c_learning
@@ -143,6 +170,7 @@ def main(_):
   else:
     raise NotImplementedError('Unknown method: %s' % alg)
 
+  
 
   program = get_program(params)
   # Set terminal='tmux' if you want different components in different windows.

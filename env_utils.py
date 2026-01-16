@@ -48,6 +48,10 @@ def load(env_name, fixed_start_end=None):
     CLASS = SawyerPeg
     max_episode_steps = 150
     kwargs['fixed_start_end'] = fixed_start_end
+  #elif env_name == 'stretchBin'
+    # CLASS = StretchBin
+    # max_episode_steps = 150
+    # kwargs['fixed_start_end'] = fixed_start_end
   elif env_name.startswith('point_'):
     CLASS = point_env.PointEnv
     kwargs['walls'] = env_name.split('_')[-1]
